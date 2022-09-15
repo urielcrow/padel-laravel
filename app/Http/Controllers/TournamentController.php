@@ -14,11 +14,16 @@ use Exception;
 
 class TournamentController extends Controller
 {
+    
+    public function __construct(){
+        $this->middleware( ['jwt.verify'] );//nuestro middleware personalizado
+    }
+
     public function showTournament(Request $request){
 
         /************Si el id del torneo es 0, entonces con el id del usuario busco el último torneo en que participo*********/
         if( intval($request->id) === 0 )
-            $request->id = DB::table('users_tournaments')->select(DB::raw('IFNULL(MAX(id_tournament),0) AS id'))->where('id_user',25)->get()[0]->id;
+            $request->id = DB::table('users_tournaments')->select(DB::raw('IFNULL(MAX(id_tournament),0) AS id'))->where('id_user',auth()->user()->id)->get()[0]->id;
         
         $tournament = DB::table('tournaments')
             ->select(['players_by_court','journals','initial_date','final_date','name'])
@@ -40,8 +45,15 @@ class TournamentController extends Controller
         }
 
         $lastJournalClose = DB::table('courts')->select(['journal'])->where([['status','0'],['id_tournament',$request->id]])->orderBy('journal','desc')->first();
-        $last_journal_close = isset($lastJournalClose->journal) ? $lastJournalClose->journal+1 : 1;
-
+        
+        $last_journal_close = 1;
+        if(isset($lastJournalClose->journal)){
+            if( $lastJournalClose->journal < $tournament[0]->journals)//mientras la ultima jornada cerrada sea menor al total de jornadas
+                $last_journal_close = $lastJournalClose->journal + 1;
+            else
+                $last_journal_close = $lastJournalClose->journal;
+        }
+       
         $journal = 0;
         if( isset($request->journal) && $request->journal > 0 && $request->journal < $last_journal_close )
             $journal = $request->journal;
@@ -54,6 +66,7 @@ class TournamentController extends Controller
             ->select(['id_user','name','set1','set2','set3','position','court'])
             ->where([['id_tournament',$request->id],['journal',$journal]])
             ->orderBy('court','asc')
+            // ->orderBy(DB::raw('set1+set2+set3'),'desc')
             ->orderBy('position','asc')
         ->get();
 
@@ -103,7 +116,7 @@ class TournamentController extends Controller
             }
         }
 
-        $constant = $tournament->players / $tournament->courts;
+        $constant = $tournament->players / $request->players_by_court;
         $court = 1;
         
         for($i=0;$i<$tournament->journals;$i++){
@@ -114,7 +127,7 @@ class TournamentController extends Controller
                     $userTournament->journal = $i+1;
                     $userTournament->position = $request->players[$j]['position'];
 
-                    if( ($j+1) % 4 == 0)
+                    if( ($j+1) % $request->players_by_court == 0)
                         $userTournament->court = $court++;
                     else
                         $userTournament->court = $court;
@@ -157,7 +170,7 @@ class TournamentController extends Controller
          /************el id del Token*********/
         $tournaments = DB::table('users_tournaments')->join('tournaments','tournaments.id','=','users_tournaments.id_tournament')
             ->select(DB::raw('DISTINCT(id_tournament) AS id'),'name')
-            ->where([['id_user',25],['status','1']])
+            ->where([['id_user',auth()->user()->id],['status','1']])
             ->orderBy('id','desc')
         ->get();
 
@@ -167,34 +180,30 @@ class TournamentController extends Controller
     public function updateTournament(Request $request){
        
         //Verificamos el total de jornadas y que el torneo no este archivado
-        $totalJournals = DB::table('tournaments')->select('journals','status','players','courts')->where('id',$request->idTournament)->get()[0];
+        $totalJournals = DB::table('tournaments')->select('journals','status','players','courts','players_by_court')->where('id',$request->idTournament)->get()[0];
 
         if( $totalJournals->status > 1)
             return response()->json("No se puede actualizar los datos de un torneo archivado",400);
 
         if($request->journal > $totalJournals->journals)
             return response()->json("Total máximo de jornadas definidas: ".$totalJournals->journals,400);
-        
-        $totalUsers = count($request->users);
-        $totalTimes = count($request->times);
 
-        if( $totalUsers != $totalJournals->players)
+        if( count($request->users) != $totalJournals->players)
             return response()->json("Total de usuarios definidos: ".$totalJournals->players,400);
 
-        if( $totalTimes != $totalJournals->courts)
+        if( count($request->times) != $totalJournals->courts)
             return response()->json("Total de jornadas definidos: ".$totalJournals->courts,400);
 
-        $constant = $totalUsers / $totalTimes;
+        $constant = $totalJournals->players / $totalJournals->players_by_court;
         $court = 1;
 
-        for($j=0;$j<$totalUsers;$j++){
+        for($j=0;$j<$totalJournals->players;$j++){
 
             $affected = DB::table('users_tournaments')
                 ->where([
                     ['id_tournament', $request->idTournament],
                     ['journal', $request->journal],
-                    ['id_user',$request->users[$j]['id_user'],
-                    ['status','1']]
+                    ['id_user',$request->users[$j]['id_user']]
                 ])
                 ->update([
                         'set1' => $request->users[$j]['set1'], 
@@ -204,14 +213,13 @@ class TournamentController extends Controller
                         'court' => $court
                     ]
                 );
-            ($j+1) % 4 == 0 ? $court++ : $court;//Lo posicionamos en la cancha que le corresponda
+            ($j+1) % $totalJournals->players_by_court === 0 ? $court++ : $court;//Lo posicionamos en la cancha que le corresponda
 
             if($court > $constant)
                 $court = 1;
-
         }
        
-        for($j=0;$j<$totalTimes;$j++){
+        for($j=0;$j<$constant;$j++){
             $affected = DB::table('courts')
                 ->where([
                     ['id_tournament', $request->idTournament],
@@ -229,9 +237,9 @@ class TournamentController extends Controller
     public function updateCloseJournalTournament(Request $request){
 
         //Verificamos el total de jornadas y que el torneo no este archivado
-        $totalJournals = DB::table('tournaments')->select('journals','status')->where('id',$request->idTournament)->get()[0];
+        $tournament = DB::table('tournaments')->select('journals','status','players','players_by_court')->where('id',$request->idTournament)->get()[0];
 
-        if( $totalJournals->status > 1)
+        if( $tournament->status > 1)
             return response()->json("No se puede cerrar la jornada de un torneo archivado",400);
 
         //Marcamos el status de los horarios de esas canchas como finalizados
@@ -248,21 +256,42 @@ class TournamentController extends Controller
         $users = DB::table('users_tournaments')->select('id_user')->where([
             ['id_tournament', $request->idTournament],
             ['journal', $request->journal]
-        ])->get();
+        ])
+        ->orderBy('court','asc')
+        ->orderBy(DB::raw('set1+set2+set3'),'desc')
+        ->orderBy('position','asc')
+        ->get();
 
-        
-        if( $request->journal < $totalJournals->journals ){//Si se trata de la última jornada ya no actualizamos la jornada próxima
-
+        if( $request->journal < $tournament->journals ){//Si se trata de la última jornada ya no actualizamos la jornada próxima
+            
             $journalNext = $request->journal + 1;
-    
-            foreach($users as $user){
-                DB::update('UPDATE users_tournaments A1 
-                INNER JOIN users_tournaments A2 ON A1.id_user= A2.id_user 
-                AND A2.journal = ? AND A1.journal = ? AND A2.id_tournament = ?
-                SET A1.position = A2.position',
-                [$request->journal,$journalNext,$request->idTournament]);
-            }
 
+            $position = 1;
+            $constant = $tournament->players / $tournament->players_by_court;
+            $court = 1;
+
+            foreach($users as $user){
+                DB::table('users_tournaments')
+                ->where([
+                    ['id_tournament', $request->idTournament],
+                    ['journal', $journalNext],
+                    ['id_user', $user->id_user]])
+                ->update([
+                    'position'=>$position,
+                    'court'=>$court
+                    ]);
+
+                ($position) % $tournament->players_by_court === 0 ? $court++ : $court;//Lo posicionamos en la cancha que le corresponda
+                $position++;
+                if($court > $constant)
+                    $court = 1;
+            }
+            
+            // DB::update('UPDATE users_tournaments A1 
+            // INNER JOIN users_tournaments A2 ON A1.id_user= A2.id_user 
+            // AND A2.journal = ? AND A1.journal = ? AND A2.id_tournament = ?
+            // SET A1.position = A2.position',
+            // [$request->journal,$journalNext,$request->idTournament]);
         }
         return response()->json($request,200);
     }
@@ -287,7 +316,7 @@ class TournamentController extends Controller
 
          /************Si el id del torneo es 0, entonces con el id del usuario busco el último torneo en que participo*********/
          if( intval($request->id) === 0 )
-            $request->id = DB::table('users_tournaments')->select(DB::raw('IFNULL(MAX(id_tournament),0) AS id'))->where('id_user',25)->get()[0]->id;
+            $request->id = DB::table('users_tournaments')->select(DB::raw('IFNULL(MAX(id_tournament),0) AS id'))->where('id_user',auth()->user()->id)->get()[0]->id;
 
         $totalJournals = DB::table('tournaments')->select('journals','status')->where('id',$request->id)->get();
 
@@ -308,7 +337,7 @@ class TournamentController extends Controller
                         (SELECT court FROM users_tournaments AS X WHERE journal = (SELECT IFNULL( (SELECT journal FROM courts WHERE status = 0 AND id_tournament = $request->id ORDER BY journal DESC LIMIT 0,1) , 1)) AND id_tournament = $request->id AND X.id_user = Z.id_user) AS court
                     FROM users_tournaments AS Z 
                     INNER JOIN users AS U ON Z.id_user = U.id
-                    WHERE id_tournament = $request->id GROUP BY id_user ORDER BY pointsGenerals DESC,position ASC");
+                    WHERE id_tournament = $request->id GROUP BY id_user ORDER BY pointsGenerals DESC,court ASC");
 
         foreach($users as $user)
             $user->img = 'http://localhost/diversos/apis/backend-cliente-almer/img/no-image.jpg';
@@ -323,24 +352,27 @@ class TournamentController extends Controller
 
     public function tableGeneralByUser(Request $request){
 
-        $user = 14;
              /************Si el id del torneo es 0, entonces con el id del usuario busco el último torneo en que participo*********/
+        $existe = 0;
         if( intval($request->id) === 0 )
-            $request->id = DB::table('users_tournaments')->select(DB::raw('IFNULL(MAX(id_tournament),0) AS id'))->where('id_user',$user)->get()[0]->id;
+            $request->id = DB::table('users_tournaments')->select(DB::raw('IFNULL(MAX(id_tournament),0) AS id'))->where('id_user',auth()->user()->id)->get()[0]->id;
+        else
+            $existe = DB::table('tournaments')->select(DB::raw("COUNT(id) AS existe"))->where('id',$request->id)->get()[0]->existe;
             
-        if( intval($request->id) === 0 )
+        if( intval($request->id) === 0 || $existe === 0 )
             return response()->json([],404);
         
-        $totalJournals = 
+        $ultimaJornadaCerrada = 
         DB::select("
             select ( IFNULL((SELECT journal FROM courts WHERE status = 0 AND id_tournament = $request->id ORDER BY journal DESC LIMIT 0,1),0) ) as last_journal_close
         ")[0]->last_journal_close;
 
+        $totalJournals = DB::table('tournaments')->select('journals')->where('id',$request->id)->get()[0];
+
         $positionForJournal = [];
         DB::beginTransaction();
         try{
-
-            for($i=1;$i <= $totalJournals; $i++){
+            for($i=1;$i <= $ultimaJornadaCerrada; $i++){
 
                 DB::select('SET @num=0');
                 $resp = DB::select("
@@ -351,7 +383,7 @@ class TournamentController extends Controller
                         @num:=@num+1 AS pos
                         FROM users_tournaments
                         WHERE id_tournament = $request->id AND journal = $i ORDER BY total DESC
-                    ) AS temporal WHERE temporal.id_user = $user
+                    ) AS temporal WHERE temporal.id_user = ".auth()->user()->id."
                 ")[0];
 
                 array_push($positionForJournal,$resp->pos);
@@ -369,13 +401,16 @@ class TournamentController extends Controller
 
         $resp = DB::table('users_tournaments')
             ->select('journal','set1','set2','set3',DB::raw('set1+set2+set3 AS pointsGeneral'),'court')
-            ->where([['id_tournament',$request->id],['id_user',$user],['journal','<=',$totalJournals]])->get();
+            ->where([['id_tournament',$request->id],['id_user',auth()->user()->id],['journal','<=',$ultimaJornadaCerrada]])->get();
 
         foreach($resp as $index => $property)
             $property->positionGeneral = $positionForJournal[$index];
-        
-        $nextGame = DB::table('courts')->select('date','time')->where([['id_tournament',$request->id],['journal',$totalJournals+1]])->get()[0];
-        $curt = DB::table('users_tournaments')->select('court')->where([['id_tournament',$request->id],['journal',$totalJournals+1],['id_user',$user]])->get()[0]->court;
+
+        if($ultimaJornadaCerrada < $totalJournals->journals)
+            $ultimaJornadaCerrada += 1;
+       
+        $nextGame = DB::table('courts')->select('date','time')->where([['id_tournament',$request->id],['journal',$ultimaJornadaCerrada]])->get()[0];
+        $curt = DB::table('users_tournaments')->select('court')->where([['id_tournament',$request->id],['journal',$ultimaJornadaCerrada],['id_user',auth()->user()->id]])->get()[0]->court;
         
         $nextGame->curt = $curt;
 

@@ -48,6 +48,12 @@ return [
             'root' => storage_path('app'),
         ],
 
+        'users' => [
+            'driver' => 'local',
+            'root' => storage_path('app/users'),
+            'url' => env('APP_URL').'/users'
+        ],
+
         'public' => [
             'driver' => 'local',
             'root' => storage_path('app/public'),
@@ -80,6 +86,7 @@ return [
 
     'links' => [
         public_path('storage') => storage_path('app/public'),
+        public_path('users') => storage_path('app/users'),
     ],
 
 ];
